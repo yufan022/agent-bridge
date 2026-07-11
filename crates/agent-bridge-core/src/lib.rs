@@ -1,5 +1,8 @@
 //! Core library for agent-bridge: sync instructions, skills, and MCP configs
 //! across Claude Code, Codex, OpenCode, and Cursor (user-global scope).
+//!
+//! Cursor does not support file-based instruction sync (User Rules have no
+//! stable file API); only skills and MCP are synced for that tool.
 
 pub mod adapters;
 pub mod error;

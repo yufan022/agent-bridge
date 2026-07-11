@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::instructions::{read_instructions, write_instructions};
 use crate::mcp::{self, McpDocument};
 use crate::paths::ToolPaths;
@@ -36,12 +36,26 @@ impl ToolAdapter {
         &self.paths
     }
 
+    pub fn supports_instructions(&self) -> bool {
+        self.paths.supports_instructions()
+    }
+
     pub fn read_instructions(&self) -> Result<Option<String>> {
-        read_instructions(self.paths.tool, &self.paths.instructions)
+        let Some(path) = &self.paths.instructions else {
+            return Ok(None);
+        };
+        read_instructions(path)
     }
 
     pub fn write_instructions(&self, body: &str) -> Result<()> {
-        write_instructions(self.paths.tool, &self.paths.instructions, body)
+        let Some(path) = &self.paths.instructions else {
+            return Err(Error::Message(format!(
+                "{} does not support file-based instruction sync \
+                 (Cursor User Rules have no stable file API)",
+                self.id()
+            )));
+        };
+        write_instructions(path, body)
     }
 
     pub fn list_skills(&self) -> Result<Vec<SkillEntry>> {
@@ -62,25 +76,40 @@ impl ToolAdapter {
     }
 
     pub fn instructions_path_display(&self) -> String {
-        self.paths.instructions.display().to_string()
+        match &self.paths.instructions {
+            Some(path) => path.display().to_string(),
+            None => "(unsupported)".into(),
+        }
     }
 
     pub fn status_lines(&self) -> Result<Vec<String>> {
         let mut lines = Vec::new();
-        let instr = self.paths.instructions.exists();
+        let instr_supported = self.supports_instructions();
+        let instr = self
+            .paths
+            .instructions
+            .as_ref()
+            .is_some_and(|p| p.exists());
         let skills = self.paths.skills_dir.exists();
         let mcp = self.paths.mcp_config.exists();
         lines.push(format!(
             "{}: instructions={} skills_dir={} mcp={}",
             self.id(),
-            bool_mark(instr),
+            if instr_supported {
+                bool_mark(instr)
+            } else {
+                "n/a"
+            },
             bool_mark(skills),
             bool_mark(mcp)
         ));
-        lines.push(format!("  instructions: {}", self.paths.instructions.display()));
+        lines.push(format!(
+            "  instructions: {}",
+            self.instructions_path_display()
+        ));
         lines.push(format!("  skills:       {}", self.paths.skills_dir.display()));
         lines.push(format!("  mcp:          {}", self.paths.mcp_config.display()));
-        if instr {
+        if instr_supported {
             if let Some(body) = self.read_instructions()? {
                 let chars = body.chars().count();
                 lines.push(format!("  instructions_chars: {chars}"));

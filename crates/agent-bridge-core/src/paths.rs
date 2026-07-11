@@ -10,7 +10,10 @@ use crate::tool::ToolId;
 pub struct ToolPaths {
     pub tool: ToolId,
     pub home: PathBuf,
-    pub instructions: PathBuf,
+    /// Global instruction file, if this tool supports file-based instructions.
+    ///
+    /// Cursor User Rules have no stable file API, so this is `None` for Cursor.
+    pub instructions: Option<PathBuf>,
     pub skills_dir: PathBuf,
     pub mcp_config: PathBuf,
 }
@@ -28,33 +31,38 @@ impl ToolPaths {
         match tool {
             ToolId::Claude => Self {
                 tool,
-                instructions: home.join(".claude/CLAUDE.md"),
+                instructions: Some(home.join(".claude/CLAUDE.md")),
                 skills_dir: home.join(".claude/skills"),
                 mcp_config: home.join(".claude.json"),
                 home,
             },
             ToolId::Codex => Self {
                 tool,
-                instructions: home.join(".codex/AGENTS.md"),
+                instructions: Some(home.join(".codex/AGENTS.md")),
                 skills_dir: home.join(".agents/skills"),
                 mcp_config: home.join(".codex/config.toml"),
                 home,
             },
             ToolId::OpenCode => Self {
                 tool,
-                instructions: home.join(".config/opencode/AGENTS.md"),
+                instructions: Some(home.join(".config/opencode/AGENTS.md")),
                 skills_dir: home.join(".config/opencode/skills"),
                 mcp_config: home.join(".config/opencode/opencode.json"),
                 home,
             },
             ToolId::Cursor => Self {
                 tool,
-                instructions: home.join(".cursor/rules/agent-bridge.mdc"),
+                instructions: None,
                 skills_dir: home.join(".cursor/skills"),
                 mcp_config: home.join(".cursor/mcp.json"),
                 home,
             },
         }
+    }
+
+    /// Whether this tool supports syncing a global instruction file.
+    pub fn supports_instructions(&self) -> bool {
+        self.instructions.is_some()
     }
 
     pub fn skill_dir(&self, name: &str) -> PathBuf {
@@ -84,7 +92,10 @@ mod tests {
     #[test]
     fn claude_paths() {
         let p = ToolPaths::for_tool_in_home(ToolId::Claude, Path::new("/tmp/home"));
-        assert_eq!(p.instructions, Path::new("/tmp/home/.claude/CLAUDE.md"));
+        assert_eq!(
+            p.instructions.as_deref(),
+            Some(Path::new("/tmp/home/.claude/CLAUDE.md"))
+        );
         assert_eq!(p.skills_dir, Path::new("/tmp/home/.claude/skills"));
         assert_eq!(p.mcp_config, Path::new("/tmp/home/.claude.json"));
     }
@@ -92,7 +103,10 @@ mod tests {
     #[test]
     fn codex_paths() {
         let p = ToolPaths::for_tool_in_home(ToolId::Codex, Path::new("/tmp/home"));
-        assert_eq!(p.instructions, Path::new("/tmp/home/.codex/AGENTS.md"));
+        assert_eq!(
+            p.instructions.as_deref(),
+            Some(Path::new("/tmp/home/.codex/AGENTS.md"))
+        );
         assert_eq!(p.skills_dir, Path::new("/tmp/home/.agents/skills"));
         assert_eq!(p.mcp_config, Path::new("/tmp/home/.codex/config.toml"));
     }
@@ -101,8 +115,8 @@ mod tests {
     fn opencode_paths() {
         let p = ToolPaths::for_tool_in_home(ToolId::OpenCode, Path::new("/tmp/home"));
         assert_eq!(
-            p.instructions,
-            Path::new("/tmp/home/.config/opencode/AGENTS.md")
+            p.instructions.as_deref(),
+            Some(Path::new("/tmp/home/.config/opencode/AGENTS.md"))
         );
         assert_eq!(
             p.skills_dir,
@@ -115,12 +129,10 @@ mod tests {
     }
 
     #[test]
-    fn cursor_paths() {
+    fn cursor_paths_skip_instructions() {
         let p = ToolPaths::for_tool_in_home(ToolId::Cursor, Path::new("/tmp/home"));
-        assert_eq!(
-            p.instructions,
-            Path::new("/tmp/home/.cursor/rules/agent-bridge.mdc")
-        );
+        assert!(p.instructions.is_none());
+        assert!(!p.supports_instructions());
         assert_eq!(p.skills_dir, Path::new("/tmp/home/.cursor/skills"));
         assert_eq!(p.mcp_config, Path::new("/tmp/home/.cursor/mcp.json"));
     }
