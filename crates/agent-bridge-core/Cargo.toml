@@ -1,0 +1,20 @@
+[package]
+name = "agent-bridge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core library for syncing AI coding agent global configs"
+
+[dependencies]
+dirs = { workspace = true }
+dunce = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+similar = { workspace = true }
+thiserror = { workspace = true }
+toml = { workspace = true }
+toml_edit = { workspace = true }
+walkdir = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

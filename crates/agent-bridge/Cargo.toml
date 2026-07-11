@@ -1,0 +1,15 @@
+[package]
+name = "agent-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "CLI to sync instructions, skills, and MCP configs across AI coding tools"
+readme = "../../README.md"
+
+[[bin]]
+name = "agent-bridge"
+path = "src/main.rs"
+
+[dependencies]
+agent-bridge-core = { workspace = true }
+clap = { workspace = true }
