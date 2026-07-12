@@ -76,7 +76,8 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
         source.paths().home.display()
     ));
 
-    let instructions = if opts.kinds.instructions {
+    let source_supports_instructions = source.supports_instructions();
+    let instructions = if opts.kinds.instructions && source_supports_instructions {
         source.read_instructions()?
     } else {
         None
@@ -93,14 +94,21 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
     };
 
     if opts.kinds.instructions {
-        match &instructions {
-            Some(body) => report.lines.push(format!(
-                "  read instructions ({} chars)",
-                body.chars().count()
-            )),
-            None => report
-                .lines
-                .push("  instructions: source file missing (skip writes)".into()),
+        if !source_supports_instructions {
+            report.lines.push(format!(
+                "  instructions: skipped ({} has no file-based instructions)",
+                source.id()
+            ));
+        } else {
+            match &instructions {
+                Some(body) => report.lines.push(format!(
+                    "  read instructions ({} chars)",
+                    body.chars().count()
+                )),
+                None => report
+                    .lines
+                    .push("  instructions: source file missing (skip writes)".into()),
+            }
         }
     }
     if opts.kinds.skills {
@@ -125,7 +133,12 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
         report.lines.push(format!("\nTarget: {}", target.id()));
 
         if opts.kinds.instructions {
-            if let Some(body) = &instructions {
+            if !target.supports_instructions() {
+                report.lines.push(format!(
+                    "  instructions: skipped ({} has no file-based instructions)",
+                    target.id()
+                ));
+            } else if let Some(body) = &instructions {
                 let existing = target.read_instructions()?.unwrap_or_default();
                 if existing.trim_end() == body.trim_end() {
                     report.lines.push("  instructions: unchanged".into());
@@ -144,13 +157,13 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
                     target.write_instructions(body)?;
                     report.lines.push(format!(
                         "  instructions: wrote {}",
-                        target.paths().instructions.display()
+                        target.instructions_path_display()
                     ));
                 }
             } else {
                 report
                     .lines
-                    .push("  instructions: skipped (source missing)".into());
+                    .push("  instructions: skipped (source missing or unsupported)".into());
             }
         }
 
@@ -246,19 +259,41 @@ pub fn diff(from: ToolId, to: ToolId, home: Option<PathBuf>) -> Result<String> {
     let mut out = String::new();
 
     let _ = writeln!(out, "## Instructions");
-    let src_i = source.read_instructions()?.unwrap_or_default();
-    let dst_i = target.read_instructions()?.unwrap_or_default();
-    if src_i.trim_end() == dst_i.trim_end() {
-        let _ = writeln!(out, "(identical)");
-    } else {
-        out.push_str(&instructions::instructions_diff(
-            &format!("{from}"),
-            &format!("{to}"),
-            &src_i,
-            &dst_i,
-        ));
-        if !out.ends_with('\n') {
-            out.push('\n');
+    match (source.supports_instructions(), target.supports_instructions()) {
+        (false, false) => {
+            let _ = writeln!(
+                out,
+                "(skipped: neither {from} nor {to} supports file-based instructions)"
+            );
+        }
+        (false, true) => {
+            let _ = writeln!(
+                out,
+                "(skipped: {from} does not support file-based instructions)"
+            );
+        }
+        (true, false) => {
+            let _ = writeln!(
+                out,
+                "(skipped: {to} does not support file-based instructions)"
+            );
+        }
+        (true, true) => {
+            let src_i = source.read_instructions()?.unwrap_or_default();
+            let dst_i = target.read_instructions()?.unwrap_or_default();
+            if src_i.trim_end() == dst_i.trim_end() {
+                let _ = writeln!(out, "(identical)");
+            } else {
+                out.push_str(&instructions::instructions_diff(
+                    &format!("{from}"),
+                    &format!("{to}"),
+                    &src_i,
+                    &dst_i,
+                ));
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
         }
     }
 
@@ -351,13 +386,21 @@ pub fn list(tool: ToolId, home: Option<PathBuf>) -> Result<String> {
             let _ = writeln!(out, "  - {name}");
         }
     }
-    let _ = writeln!(out, "\nInstructions: {}", adapter.paths().instructions.display());
-    match adapter.read_instructions()? {
-        Some(body) => {
-            let _ = writeln!(out, "  present ({} chars)", body.chars().count());
-        }
-        None => {
-            let _ = writeln!(out, "  missing");
+    let _ = writeln!(
+        out,
+        "\nInstructions: {}",
+        adapter.instructions_path_display()
+    );
+    if !adapter.supports_instructions() {
+        let _ = writeln!(out, "  unsupported (no stable file API)");
+    } else {
+        match adapter.read_instructions()? {
+            Some(body) => {
+                let _ = writeln!(out, "  present ({} chars)", body.chars().count());
+            }
+            None => {
+                let _ = writeln!(out, "  missing");
+            }
         }
     }
     Ok(out)
@@ -421,13 +464,15 @@ mod tests {
             Err(e) => panic!("{e}"),
         };
         assert!(report.success(), "{}", report.render());
+        assert!(
+            report.render().contains("instructions: skipped (cursor has no file-based instructions)"),
+            "expected cursor instructions skip, got:\n{}",
+            report.render()
+        );
 
         let cursor = ToolAdapter::in_home(ToolId::Cursor, home);
-        let instr = match cursor.read_instructions() {
-            Ok(Some(s)) => s,
-            other => panic!("cursor instructions: {other:?}"),
-        };
-        assert!(instr.contains("Always test"));
+        assert!(cursor.read_instructions().ok().flatten().is_none());
+        assert!(!home.join(".cursor/rules/agent-bridge.mdc").exists());
 
         let skill_link = home.join(".cursor/skills/demo");
         assert!(
@@ -442,6 +487,13 @@ mod tests {
             Err(e) => panic!("{e}"),
         };
         assert!(cursor_mcp.servers.contains_key("demo"));
+
+        let codex = ToolAdapter::in_home(ToolId::Codex, home);
+        let codex_instr = match codex.read_instructions() {
+            Ok(Some(s)) => s,
+            other => panic!("codex instructions: {other:?}"),
+        };
+        assert!(codex_instr.contains("Always test"));
 
         let codex_raw = match fs::read_to_string(home.join(".codex/config.toml")) {
             Ok(s) => s,
