@@ -154,7 +154,7 @@ fn write_claude_mcp(path: &Path, doc: &McpDocument, mode: WriteMode) -> Result<(
         root.remove("mcpServers"),
         doc,
         mode,
-        |s| server_to_claude_json(s),
+        server_to_claude_json,
     )?;
     root.insert("mcpServers".to_string(), Value::Object(servers));
     write_json(path, &Value::Object(root))
@@ -166,7 +166,7 @@ fn write_cursor_mcp(path: &Path, doc: &McpDocument, mode: WriteMode) -> Result<(
         root.remove("mcpServers"),
         doc,
         mode,
-        |s| server_to_cursor_json(s),
+        server_to_cursor_json,
     )?;
     root.insert("mcpServers".to_string(), Value::Object(servers));
     write_json(path, &Value::Object(root))
