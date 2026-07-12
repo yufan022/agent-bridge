@@ -78,9 +78,8 @@ pub fn link_skill(
                             .unwrap_or("?")
                             .to_string(),
                         path: link_path.to_path_buf(),
-                        message: format!(
-                            "symlink exists and points elsewhere (use --force to replace)"
-                        ),
+                        message: "symlink exists and points elsewhere (use --force to replace)"
+                            .to_string(),
                     });
                 }
                 fs::remove_file(link_path).map_err(|e| Error::io(link_path, e))?;

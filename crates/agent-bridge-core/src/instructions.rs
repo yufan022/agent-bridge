@@ -7,7 +7,7 @@ use crate::fsutil::{atomic_write, read_optional};
 
 /// Read instruction body from a plain markdown file.
 pub fn read_instructions(path: &Path) -> Result<Option<String>> {
-    Ok(read_optional(path)?)
+    read_optional(path)
 }
 
 /// Write instruction body as plain markdown (trailing newline normalized).
