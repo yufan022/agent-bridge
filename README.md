@@ -15,7 +15,7 @@ Design:
 
 - **Arbitrary direction**: pick any `--from` and one or more `--to` tools (no fixed source of truth).
 - **Skills**: target side gets a **symlink** to the source skill's real path.
-- **MCP**: converted through an internal IR (JSON / TOML / OpenCode `local|remote`), with env syntax rewritten (`${VAR}` ↔ `${env:VAR}` ↔ `{env:VAR}`).
+- **MCP**: converted through an internal IR (JSON / TOML / OpenCode `local|remote`), with env syntax rewritten (`${VAR}` ↔ `${env:VAR}` ↔ `{env:VAR}`). Remote HTTP subtypes (`sse` vs `http` / streamable HTTP) are preserved across Claude/Cursor; when syncing **to Codex**, SSE is converted to streamable HTTP (and a trailing `/sse` path is rewritten to `/mcp`) because Codex does not support the legacy SSE transport.
 - **Safe merge**: only MCP-related keys are updated; other fields in shared config files are preserved.
 - **Scope**: user-global only (no project-level paths in this release).
 
