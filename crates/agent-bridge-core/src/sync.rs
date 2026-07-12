@@ -572,7 +572,7 @@ mod tests {
         match &codex_mcp.servers["asana"].transport {
             McpTransport::Http { protocol, url, .. } => {
                 assert_eq!(*protocol, crate::mcp::HttpProtocol::StreamableHttp);
-                assert_eq!(url, "https://mcp.asana.com/sse");
+                assert_eq!(url, "https://mcp.asana.com/mcp");
             }
             _ => panic!("expected http"),
         }

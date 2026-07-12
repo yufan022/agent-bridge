@@ -89,6 +89,7 @@ pub fn write_mcp(tool: ToolId, path: &Path, doc: &McpDocument, mode: WriteMode) 
 ///
 /// Codex only supports streamable HTTP for remote servers, so SSE entries are
 /// rewritten to [`HttpProtocol::StreamableHttp`] before compare/write.
+/// A trailing `/sse` path segment is also rewritten to `/mcp`.
 pub fn normalize_mcp_for_tool(tool: ToolId, doc: &McpDocument) -> McpDocument {
     if tool != ToolId::Codex {
         return doc.clone();
@@ -126,13 +127,34 @@ fn convert_sse_to_streamable_http(server: &McpServer) -> McpServer {
         } => McpServer {
             name: server.name.clone(),
             transport: McpTransport::Http {
-                url: url.clone(),
+                url: rewrite_sse_url_to_streamable_http(url),
                 headers: headers.clone(),
                 protocol: HttpProtocol::StreamableHttp,
             },
         },
         _ => server.clone(),
     }
+}
+
+/// Rewrite a common SSE endpoint path suffix to the streamable HTTP path.
+///
+/// When the URL path ends with `/sse` or `/sse/` (case-insensitive), replace that
+/// segment with `/mcp` or `/mcp/`. Query strings and fragments are preserved.
+/// Other URLs are returned unchanged.
+fn rewrite_sse_url_to_streamable_http(url: &str) -> String {
+    let split_at = url.find(['?', '#']).unwrap_or(url.len());
+    let (path_part, suffix) = url.split_at(split_at);
+    let lower = path_part.to_ascii_lowercase();
+
+    let rewritten = if lower.ends_with("/sse/") {
+        format!("{}mcp/", &path_part[..path_part.len() - 4])
+    } else if lower.ends_with("/sse") {
+        format!("{}mcp", &path_part[..path_part.len() - 3])
+    } else {
+        path_part.to_string()
+    };
+
+    format!("{rewritten}{suffix}")
 }
 
 fn parse_http_protocol(type_field: Option<&str>) -> HttpProtocol {
@@ -1040,7 +1062,7 @@ mod tests {
         match &normalized.servers["asana"].transport {
             McpTransport::Http { protocol, url, .. } => {
                 assert_eq!(*protocol, HttpProtocol::StreamableHttp);
-                assert_eq!(url, "https://mcp.asana.com/sse");
+                assert_eq!(url, "https://mcp.asana.com/mcp");
             }
             _ => panic!("expected http"),
         }
@@ -1058,7 +1080,8 @@ mod tests {
             Ok(s) => s,
             Err(_) => return,
         };
-        assert!(raw.contains("mcp.asana.com/sse"));
+        assert!(raw.contains("mcp.asana.com/mcp"));
+        assert!(!raw.contains("mcp.asana.com/sse"));
         assert!(raw.contains("mcp.notion.com/mcp"));
 
         let read_back = match read_mcp(ToolId::Codex, &path) {
@@ -1110,5 +1133,38 @@ mod tests {
             McpTransport::Http { protocol, .. } => assert_eq!(*protocol, HttpProtocol::Sse),
             _ => panic!("expected http"),
         }
+    }
+
+    #[test]
+    fn rewrite_sse_url_path_cases() {
+        assert_eq!(
+            rewrite_sse_url_to_streamable_http("https://mcp.asana.com/sse"),
+            "https://mcp.asana.com/mcp"
+        );
+        assert_eq!(
+            rewrite_sse_url_to_streamable_http("https://Example.com/SSE"),
+            "https://Example.com/mcp"
+        );
+        assert_eq!(
+            rewrite_sse_url_to_streamable_http("https://example.com/sse/"),
+            "https://example.com/mcp/"
+        );
+        assert_eq!(
+            rewrite_sse_url_to_streamable_http("https://example.com/sse?token=1"),
+            "https://example.com/mcp?token=1"
+        );
+        assert_eq!(
+            rewrite_sse_url_to_streamable_http("https://example.com/sse#frag"),
+            "https://example.com/mcp#frag"
+        );
+        // Non-suffix /sse must not be rewritten.
+        assert_eq!(
+            rewrite_sse_url_to_streamable_http("https://example.com/asses"),
+            "https://example.com/asses"
+        );
+        assert_eq!(
+            rewrite_sse_url_to_streamable_http("https://example.com/api/v1"),
+            "https://example.com/api/v1"
+        );
     }
 }
