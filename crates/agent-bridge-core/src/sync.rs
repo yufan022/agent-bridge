@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use crate::adapters::ToolAdapter;
 use crate::error::{Error, Result};
 use crate::instructions;
+use crate::mcp::{normalize_mcp_for_tool, sse_conversions_for_codex};
 use crate::skills;
 use crate::tool::{SyncKinds, ToolId, WriteMode};
 
@@ -213,14 +214,22 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
 
         if opts.kinds.mcp {
             let existing = target.read_mcp()?;
-            if existing == mcp && write_mode == WriteMode::Safe {
+            let to_write = normalize_mcp_for_tool(*target_id, &mcp);
+            if *target_id == ToolId::Codex {
+                for name in sse_conversions_for_codex(&mcp) {
+                    report.lines.push(format!(
+                        "  mcp '{name}': converting SSE → streamable HTTP for Codex"
+                    ));
+                }
+            }
+            if existing == to_write && write_mode == WriteMode::Safe {
                 report.lines.push("  mcp: unchanged".into());
             } else if opts.dry_run {
                 report.lines.push(format!(
                     "  mcp: would write {} server(s) ({write_mode:?})",
-                    mcp.servers.len()
+                    to_write.servers.len()
                 ));
-                let src_names: BTreeSet<_> = mcp.servers.keys().cloned().collect();
+                let src_names: BTreeSet<_> = to_write.servers.keys().cloned().collect();
                 let dst_names: BTreeSet<_> = existing.servers.keys().cloned().collect();
                 for n in src_names.difference(&dst_names) {
                     report.lines.push(format!("    + {n}"));
@@ -231,7 +240,7 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
                     }
                 }
                 for n in src_names.intersection(&dst_names) {
-                    if existing.servers.get(n) != mcp.servers.get(n) {
+                    if existing.servers.get(n) != to_write.servers.get(n) {
                         report.lines.push(format!("    ~ {n}"));
                     }
                 }
@@ -324,7 +333,10 @@ pub fn diff(from: ToolId, to: ToolId, home: Option<PathBuf>) -> Result<String> {
     let _ = writeln!(out, "\n## MCP");
     let src_mcp = source.read_mcp()?;
     let dst_mcp = target.read_mcp()?;
-    let src_names: BTreeSet<_> = src_mcp.servers.keys().cloned().collect();
+    // Compare using the target-normalized source so SSE→streamable HTTP for Codex
+    // does not show as a perpetual drift.
+    let src_for_target = normalize_mcp_for_tool(to, &src_mcp);
+    let src_names: BTreeSet<_> = src_for_target.servers.keys().cloned().collect();
     let dst_names: BTreeSet<_> = dst_mcp.servers.keys().cloned().collect();
     for n in src_names.difference(&dst_names) {
         let _ = writeln!(out, "+ {n}");
@@ -333,7 +345,7 @@ pub fn diff(from: ToolId, to: ToolId, home: Option<PathBuf>) -> Result<String> {
         let _ = writeln!(out, "- {n}");
     }
     for n in src_names.intersection(&dst_names) {
-        if src_mcp.servers.get(n) == dst_mcp.servers.get(n) {
+        if src_for_target.servers.get(n) == dst_mcp.servers.get(n) {
             let _ = writeln!(out, "= {n}");
         } else {
             let _ = writeln!(out, "~ {n}");
@@ -500,5 +512,92 @@ mod tests {
             Err(e) => panic!("{e}"),
         };
         assert!(codex_raw.contains("mcp_servers") || codex_raw.contains("[mcp_servers"));
+    }
+
+    #[test]
+    fn sync_claude_sse_to_codex_converts_protocol() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let home = dir.path();
+        let _ = fs::create_dir_all(home.join(".claude"));
+        let _ = fs::write(
+            home.join(".claude.json"),
+            r#"{
+  "mcpServers": {
+    "asana": {
+      "type": "sse",
+      "url": "https://mcp.asana.com/sse"
+    },
+    "notion": {
+      "type": "http",
+      "url": "https://mcp.notion.com/mcp"
+    }
+  }
+}
+"#,
+        );
+
+        let report = match sync(&SyncOptions {
+            from: ToolId::Claude,
+            to: vec![ToolId::Codex],
+            kinds: SyncKinds {
+                instructions: false,
+                skills: false,
+                mcp: true,
+            },
+            dry_run: false,
+            prune: false,
+            force: false,
+            home: Some(home.to_path_buf()),
+        }) {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert!(report.success(), "{}", report.render());
+        assert!(
+            report
+                .render()
+                .contains("converting SSE → streamable HTTP for Codex"),
+            "expected conversion notice, got:\n{}",
+            report.render()
+        );
+
+        let codex = ToolAdapter::in_home(ToolId::Codex, home);
+        let codex_mcp = match codex.read_mcp() {
+            Ok(d) => d,
+            Err(e) => panic!("{e}"),
+        };
+        match &codex_mcp.servers["asana"].transport {
+            McpTransport::Http { protocol, url, .. } => {
+                assert_eq!(*protocol, crate::mcp::HttpProtocol::StreamableHttp);
+                assert_eq!(url, "https://mcp.asana.com/sse");
+            }
+            _ => panic!("expected http"),
+        }
+
+        // Second sync should be a no-op (no perpetual rewrite from protocol mismatch).
+        let report2 = match sync(&SyncOptions {
+            from: ToolId::Claude,
+            to: vec![ToolId::Codex],
+            kinds: SyncKinds {
+                instructions: false,
+                skills: false,
+                mcp: true,
+            },
+            dry_run: false,
+            prune: false,
+            force: false,
+            home: Some(home.to_path_buf()),
+        }) {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert!(
+            report2.render().contains("mcp: unchanged"),
+            "expected unchanged after conversion, got:\n{}",
+            report2.render()
+        );
     }
 }

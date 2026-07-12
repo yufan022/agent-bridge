@@ -24,6 +24,16 @@ pub struct McpServer {
     pub transport: McpTransport,
 }
 
+/// HTTP MCP transport subtype (legacy SSE vs streamable HTTP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HttpProtocol {
+    /// Legacy HTTP+SSE transport (MCP 2024-11-05). Codex does not support this.
+    Sse,
+    /// Streamable HTTP transport (MCP 2025-03-26+).
+    #[default]
+    StreamableHttp,
+}
+
 /// Transport kinds supported by the IR.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpTransport {
@@ -35,6 +45,7 @@ pub enum McpTransport {
     Http {
         url: String,
         headers: BTreeMap<String, String>,
+        protocol: HttpProtocol,
     },
 }
 
@@ -65,11 +76,81 @@ pub fn read_mcp(tool: ToolId, path: &Path) -> Result<McpDocument> {
 
 /// Write IR MCP servers into a tool's config file, merging carefully.
 pub fn write_mcp(tool: ToolId, path: &Path, doc: &McpDocument, mode: WriteMode) -> Result<()> {
+    let normalized = normalize_mcp_for_tool(tool, doc);
     match tool {
-        ToolId::Claude => write_claude_mcp(path, doc, mode),
-        ToolId::Cursor => write_cursor_mcp(path, doc, mode),
-        ToolId::OpenCode => write_opencode_mcp(path, doc, mode),
-        ToolId::Codex => write_codex_mcp(path, doc, mode),
+        ToolId::Claude => write_claude_mcp(path, &normalized, mode),
+        ToolId::Cursor => write_cursor_mcp(path, &normalized, mode),
+        ToolId::OpenCode => write_opencode_mcp(path, &normalized, mode),
+        ToolId::Codex => write_codex_mcp(path, &normalized, mode),
+    }
+}
+
+/// Normalize an MCP document for a target tool.
+///
+/// Codex only supports streamable HTTP for remote servers, so SSE entries are
+/// rewritten to [`HttpProtocol::StreamableHttp`] before compare/write.
+pub fn normalize_mcp_for_tool(tool: ToolId, doc: &McpDocument) -> McpDocument {
+    if tool != ToolId::Codex {
+        return doc.clone();
+    }
+
+    let mut out = McpDocument::default();
+    for (name, server) in &doc.servers {
+        out.servers
+            .insert(name.clone(), convert_sse_to_streamable_http(server));
+    }
+    out
+}
+
+/// Names of servers whose transport was converted from SSE to streamable HTTP
+/// for a Codex target.
+pub fn sse_conversions_for_codex(doc: &McpDocument) -> Vec<&str> {
+    doc.servers
+        .iter()
+        .filter_map(|(name, server)| match &server.transport {
+            McpTransport::Http {
+                protocol: HttpProtocol::Sse,
+                ..
+            } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn convert_sse_to_streamable_http(server: &McpServer) -> McpServer {
+    match &server.transport {
+        McpTransport::Http {
+            url,
+            headers,
+            protocol: HttpProtocol::Sse,
+        } => McpServer {
+            name: server.name.clone(),
+            transport: McpTransport::Http {
+                url: url.clone(),
+                headers: headers.clone(),
+                protocol: HttpProtocol::StreamableHttp,
+            },
+        },
+        _ => server.clone(),
+    }
+}
+
+fn parse_http_protocol(type_field: Option<&str>) -> HttpProtocol {
+    match type_field.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("sse") => HttpProtocol::Sse,
+        // Claude/Cursor accept both names for streamable HTTP.
+        Some("http") | Some("streamable-http") | Some("streamable_http") => {
+            HttpProtocol::StreamableHttp
+        }
+        // Missing or unknown type with a URL: treat as streamable HTTP.
+        _ => HttpProtocol::StreamableHttp,
+    }
+}
+
+fn http_protocol_type_name(protocol: HttpProtocol) -> &'static str {
+    match protocol {
+        HttpProtocol::Sse => "sse",
+        HttpProtocol::StreamableHttp => "http",
     }
 }
 
@@ -113,11 +194,13 @@ fn parse_json_server(
             ToolId::Claude => headers,
             _ => headers,
         };
+        let protocol = parse_http_protocol(obj.get("type").and_then(|v| v.as_str()));
         return Ok(McpServer {
             name: name.to_string(),
             transport: McpTransport::Http {
                 url: url.to_string(),
                 headers,
+                protocol,
             },
         });
     }
@@ -211,9 +294,16 @@ fn server_to_claude_json(server: &McpServer) -> Value {
             }
             Value::Object(obj)
         }
-        McpTransport::Http { url, headers } => {
+        McpTransport::Http {
+            url,
+            headers,
+            protocol,
+        } => {
             let mut obj = Map::new();
-            obj.insert("type".into(), Value::String("http".into()));
+            obj.insert(
+                "type".into(),
+                Value::String(http_protocol_type_name(*protocol).into()),
+            );
             obj.insert("url".into(), Value::String(url.clone()));
             if !headers.is_empty() {
                 obj.insert("headers".into(), map_to_json_object(headers));
@@ -240,9 +330,17 @@ fn server_to_cursor_json(server: &McpServer) -> Value {
             }
             Value::Object(obj)
         }
-        McpTransport::Http { url, headers } => {
+        McpTransport::Http {
+            url,
+            headers,
+            protocol,
+        } => {
             let headers = rewrite_map_values(headers.clone(), rewrite_env_claude_to_cursor);
             let mut obj = Map::new();
+            obj.insert(
+                "type".into(),
+                Value::String(http_protocol_type_name(*protocol).into()),
+            );
             obj.insert("url".into(), Value::String(url.clone()));
             if !headers.is_empty() {
                 obj.insert("headers".into(), map_to_json_object(&headers));
@@ -298,18 +396,24 @@ fn parse_opencode_server(path: &Path, name: &str, entry: &Value) -> Result<McpSe
             }
         });
 
-    if ty == "remote" {
+    if ty == "remote" || ty == "sse" || ty == "http" {
         let url = obj
             .get("url")
             .and_then(|v| v.as_str())
             .ok_or_else(|| Error::invalid_mcp(path, format!("remote server '{name}' needs url")))?;
         let headers = extract_string_map(obj.get("headers")).unwrap_or_default();
         let headers = rewrite_map_values(headers, rewrite_env_opencode_to_claude);
+        // Prefer explicit transport hints; plain "remote" defaults to streamable HTTP.
+        let protocol = match ty {
+            "sse" => HttpProtocol::Sse,
+            _ => HttpProtocol::StreamableHttp,
+        };
         return Ok(McpServer {
             name: name.to_string(),
             transport: McpTransport::Http {
                 url: url.to_string(),
                 headers,
+                protocol,
             },
         });
     }
@@ -379,7 +483,11 @@ fn server_to_opencode_json(server: &McpServer) -> Value {
             }
             Value::Object(obj)
         }
-        McpTransport::Http { url, headers } => {
+        McpTransport::Http {
+            url,
+            headers,
+            protocol: _,
+        } => {
             let headers = rewrite_map_values(headers.clone(), rewrite_env_claude_to_opencode);
             let mut obj = Map::new();
             obj.insert("type".into(), Value::String("remote".into()));
@@ -436,6 +544,8 @@ fn parse_codex_server(
             transport: McpTransport::Http {
                 url: url.to_string(),
                 headers,
+                // Codex only speaks streamable HTTP for remote MCP.
+                protocol: HttpProtocol::StreamableHttp,
             },
         });
     }
@@ -524,7 +634,11 @@ fn write_codex_mcp(path: &Path, doc: &McpDocument, mode: WriteMode) -> Result<()
                     server_table.insert("env", TomlValue::InlineTable(env_table).into());
                 }
             }
-            McpTransport::Http { url, headers } => {
+            McpTransport::Http {
+                url,
+                headers,
+                protocol: _,
+            } => {
                 server_table.insert("url", TomlValue::from(url.as_str()).into());
                 let mut bearer = None;
                 let mut other = BTreeMap::new();
@@ -747,6 +861,7 @@ mod tests {
                         h.insert("Authorization".into(), "Bearer ${TOKEN}".into());
                         h
                     },
+                    protocol: HttpProtocol::StreamableHttp,
                 },
             },
         );
@@ -830,5 +945,170 @@ mod tests {
         };
         assert!(raw.contains("\"theme\""));
         assert!(raw.contains("demo"));
+    }
+
+    #[test]
+    fn reads_claude_sse_and_http_protocol() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let path = dir.path().join(".claude.json");
+        if atomic_write(
+            &path,
+            r#"{
+  "mcpServers": {
+    "asana": {
+      "type": "sse",
+      "url": "https://mcp.asana.com/sse",
+      "headers": { "X-Api-Key": "k" }
+    },
+    "notion": {
+      "type": "http",
+      "url": "https://mcp.notion.com/mcp"
+    },
+    "alias": {
+      "type": "streamable-http",
+      "url": "https://example.com/mcp"
+    }
+  }
+}
+"#,
+        )
+        .is_err()
+        {
+            return;
+        }
+        let doc = match read_mcp(ToolId::Claude, &path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        match &doc.servers["asana"].transport {
+            McpTransport::Http { protocol, url, .. } => {
+                assert_eq!(*protocol, HttpProtocol::Sse);
+                assert_eq!(url, "https://mcp.asana.com/sse");
+            }
+            _ => panic!("expected http"),
+        }
+        match &doc.servers["notion"].transport {
+            McpTransport::Http { protocol, .. } => {
+                assert_eq!(*protocol, HttpProtocol::StreamableHttp);
+            }
+            _ => panic!("expected http"),
+        }
+        match &doc.servers["alias"].transport {
+            McpTransport::Http { protocol, .. } => {
+                assert_eq!(*protocol, HttpProtocol::StreamableHttp);
+            }
+            _ => panic!("expected http"),
+        }
+    }
+
+    #[test]
+    fn codex_write_converts_sse_to_streamable_http() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let path = dir.path().join("config.toml");
+        let mut doc = McpDocument::default();
+        doc.servers.insert(
+            "asana".into(),
+            McpServer {
+                name: "asana".into(),
+                transport: McpTransport::Http {
+                    url: "https://mcp.asana.com/sse".into(),
+                    headers: BTreeMap::new(),
+                    protocol: HttpProtocol::Sse,
+                },
+            },
+        );
+        doc.servers.insert(
+            "notion".into(),
+            McpServer {
+                name: "notion".into(),
+                transport: McpTransport::Http {
+                    url: "https://mcp.notion.com/mcp".into(),
+                    headers: BTreeMap::new(),
+                    protocol: HttpProtocol::StreamableHttp,
+                },
+            },
+        );
+
+        assert_eq!(sse_conversions_for_codex(&doc), vec!["asana"]);
+        let normalized = normalize_mcp_for_tool(ToolId::Codex, &doc);
+        match &normalized.servers["asana"].transport {
+            McpTransport::Http { protocol, url, .. } => {
+                assert_eq!(*protocol, HttpProtocol::StreamableHttp);
+                assert_eq!(url, "https://mcp.asana.com/sse");
+            }
+            _ => panic!("expected http"),
+        }
+        match &normalized.servers["notion"].transport {
+            McpTransport::Http { protocol, .. } => {
+                assert_eq!(*protocol, HttpProtocol::StreamableHttp);
+            }
+            _ => panic!("expected http"),
+        }
+
+        if write_mcp(ToolId::Codex, &path, &doc, WriteMode::Safe).is_err() {
+            return;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        assert!(raw.contains("mcp.asana.com/sse"));
+        assert!(raw.contains("mcp.notion.com/mcp"));
+
+        let read_back = match read_mcp(ToolId::Codex, &path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // Idempotent: second normalize/compare should see no protocol drift.
+        assert_eq!(normalize_mcp_for_tool(ToolId::Codex, &doc), read_back);
+        match &read_back.servers["asana"].transport {
+            McpTransport::Http { protocol, .. } => {
+                assert_eq!(*protocol, HttpProtocol::StreamableHttp);
+            }
+            _ => panic!("expected http"),
+        }
+    }
+
+    #[test]
+    fn preserves_sse_when_writing_claude() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let path = dir.path().join(".claude.json");
+        let mut doc = McpDocument::default();
+        doc.servers.insert(
+            "asana".into(),
+            McpServer {
+                name: "asana".into(),
+                transport: McpTransport::Http {
+                    url: "https://mcp.asana.com/sse".into(),
+                    headers: BTreeMap::new(),
+                    protocol: HttpProtocol::Sse,
+                },
+            },
+        );
+        if write_mcp(ToolId::Claude, &path, &doc, WriteMode::Safe).is_err() {
+            return;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        assert!(raw.contains("\"type\": \"sse\"") || raw.contains("\"type\":\"sse\""));
+        let back = match read_mcp(ToolId::Claude, &path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        match &back.servers["asana"].transport {
+            McpTransport::Http { protocol, .. } => assert_eq!(*protocol, HttpProtocol::Sse),
+            _ => panic!("expected http"),
+        }
     }
 }
