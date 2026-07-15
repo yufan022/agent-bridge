@@ -14,6 +14,7 @@ Supported tools:
 Design:
 
 - **Arbitrary direction**: pick any `--from` and one or more `--to` tools (no fixed source of truth).
+- **Instructions**: target side gets a **symlink** to the source instruction file's real path (same canonicalization rules as skills).
 - **Skills**: target side gets a **symlink** to the source skill's real path.
 - **MCP**: converted through an internal IR (JSON / TOML / OpenCode `local|remote`), with env syntax rewritten (`${VAR}` ↔ `${env:VAR}` ↔ `{env:VAR}`). Remote HTTP subtypes (`sse` vs `http` / streamable HTTP) are preserved across Claude/Cursor; when syncing **to Codex**, SSE is converted to streamable HTTP (and a trailing `/sse` path is rewritten to `/mcp`) because Codex does not support the legacy SSE transport.
 - **Safe merge**: only MCP-related keys are updated; other fields in shared config files are preserved.
@@ -61,14 +62,15 @@ agent-bridge list --tool claude
 | `--only <kinds>` | `instructions`, `skills`, `mcp` (default: all) |
 | `--dry-run` | Print plan / diffs; write nothing |
 | `--prune` | Remove target MCP servers and attributable skill symlinks absent from source |
-| `--force` | Replace conflicting skill directories/symlinks |
+| `--force` | Replace conflicting skill directories/symlinks and instruction files |
 
 ## Notes
 
 - Cursor User Rules (Settings → Rules) have no stable file API and are cloud-backed; agent-bridge therefore **does not sync instructions for Cursor**. Skills and MCP for Cursor are still synced. When `instructions` is requested and Cursor is source or target, that kind is skipped with a clear status line.
 - Claude user-scope MCP lives in the top-level `mcpServers` key of `~/.claude.json` (project-local entries under path keys are left alone).
-- Symlinks always point at the **canonical** source skill directory to avoid A→B→C chains.
-- Unix only for skill symlinks in this release.
+- Symlinks (instructions and skills) always point at the **canonical** source path to avoid A→B→C chains.
+- `diff` for instructions compares real paths first; when paths differ it also shows a content diff.
+- Unix only for instruction/skill symlinks in this release.
 
 ## Development
 

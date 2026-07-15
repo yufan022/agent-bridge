@@ -78,8 +78,8 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
     ));
 
     let source_supports_instructions = source.supports_instructions();
-    let instructions = if opts.kinds.instructions && source_supports_instructions {
-        source.read_instructions()?
+    let source_instructions_path = if opts.kinds.instructions && source_supports_instructions {
+        source.instructions_real_path()?
     } else {
         None
     };
@@ -101,14 +101,14 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
                 source.id()
             ));
         } else {
-            match &instructions {
-                Some(body) => report.lines.push(format!(
-                    "  read instructions ({} chars)",
-                    body.chars().count()
+            match &source_instructions_path {
+                Some(path) => report.lines.push(format!(
+                    "  instructions source: {}",
+                    path.display()
                 )),
                 None => report
                     .lines
-                    .push("  instructions: source file missing (skip writes)".into()),
+                    .push("  instructions: source file missing (skip links)".into()),
             }
         }
     }
@@ -139,27 +139,49 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
                     "  instructions: skipped ({} has no file-based instructions)",
                     target.id()
                 ));
-            } else if let Some(body) = &instructions {
-                let existing = target.read_instructions()?.unwrap_or_default();
-                if existing.trim_end() == body.trim_end() {
-                    report.lines.push("  instructions: unchanged".into());
-                } else if opts.dry_run {
-                    report.lines.push("  instructions: would update".into());
-                    let diff = instructions::instructions_diff(
-                        &format!("{} (source)", source.id()),
-                        &format!("{} (target)", target.id()),
-                        body,
-                        &existing,
-                    );
-                    if !diff.trim().is_empty() {
-                        report.lines.push(diff);
+            } else if let Some(source_real) = &source_instructions_path {
+                if let Some(link_path) = target.instructions_path() {
+                    let target_real = target.instructions_real_path()?;
+                    if target_real.as_ref() == Some(source_real) {
+                        report.lines.push("  instructions: unchanged".into());
+                    } else if opts.dry_run {
+                        report.lines.push(format!(
+                            "  instructions: would symlink {} -> {}",
+                            link_path.display(),
+                            source_real.display()
+                        ));
+                        let src_body = source.read_instructions()?.unwrap_or_default();
+                        let dst_body = target.read_instructions()?.unwrap_or_default();
+                        let comparison = instructions::format_instructions_comparison(
+                            &format!("{} (source)", source.id()),
+                            &format!("{} (target)", target.id()),
+                            source.instructions_path(),
+                            target.instructions_path(),
+                            Some(source_real.as_path()),
+                            target_real.as_deref(),
+                            &src_body,
+                            &dst_body,
+                        );
+                        for line in comparison.lines() {
+                            report.lines.push(line.to_string());
+                        }
+                    } else {
+                        match target.link_instructions(source_real, opts.force) {
+                            Ok(action) => report.lines.push(format!(
+                                "  instructions: {:?} {} -> {}",
+                                action,
+                                link_path.display(),
+                                source_real.display()
+                            )),
+                            Err(e) => {
+                                report.errors.push(format!(
+                                    "{} instructions: {e}",
+                                    target.id()
+                                ));
+                                report.lines.push(format!("  instructions: ERROR {e}"));
+                            }
+                        }
                     }
-                } else {
-                    target.write_instructions(body)?;
-                    report.lines.push(format!(
-                        "  instructions: wrote {}",
-                        target.instructions_path_display()
-                    ));
                 }
             } else {
                 report
@@ -288,21 +310,20 @@ pub fn diff(from: ToolId, to: ToolId, home: Option<PathBuf>) -> Result<String> {
             );
         }
         (true, true) => {
+            let src_real = source.instructions_real_path()?;
+            let dst_real = target.instructions_real_path()?;
             let src_i = source.read_instructions()?.unwrap_or_default();
             let dst_i = target.read_instructions()?.unwrap_or_default();
-            if src_i.trim_end() == dst_i.trim_end() {
-                let _ = writeln!(out, "(identical)");
-            } else {
-                out.push_str(&instructions::instructions_diff(
-                    &format!("{from}"),
-                    &format!("{to}"),
-                    &src_i,
-                    &dst_i,
-                ));
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-            }
+            out.push_str(&instructions::format_instructions_comparison(
+                &format!("{from}"),
+                &format!("{to}"),
+                source.instructions_path(),
+                target.instructions_path(),
+                src_real.as_deref(),
+                dst_real.as_deref(),
+                &src_i,
+                &dst_i,
+            ));
         }
     }
 
@@ -501,11 +522,30 @@ mod tests {
         assert!(cursor_mcp.servers.contains_key("demo"));
 
         let codex = ToolAdapter::in_home(ToolId::Codex, home);
+        let codex_instr_path = home.join(".codex/AGENTS.md");
+        assert!(
+            codex_instr_path
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false),
+            "codex instructions should be a symlink"
+        );
         let codex_instr = match codex.read_instructions() {
             Ok(Some(s)) => s,
             other => panic!("codex instructions: {other:?}"),
         };
         assert!(codex_instr.contains("Always test"));
+
+        let claude_real = match ToolAdapter::in_home(ToolId::Claude, home).instructions_real_path()
+        {
+            Ok(Some(p)) => p,
+            other => panic!("claude real path: {other:?}"),
+        };
+        let codex_real = match codex.instructions_real_path() {
+            Ok(Some(p)) => p,
+            other => panic!("codex real path: {other:?}"),
+        };
+        assert_eq!(claude_real, codex_real);
 
         let codex_raw = match fs::read_to_string(home.join(".codex/config.toml")) {
             Ok(s) => s,
@@ -599,5 +639,87 @@ mod tests {
             "expected unchanged after conversion, got:\n{}",
             report2.render()
         );
+    }
+
+    #[test]
+    fn sync_instructions_requires_force_for_real_file() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let home = dir.path();
+        let _ = fs::create_dir_all(home.join(".claude"));
+        let _ = fs::create_dir_all(home.join(".codex"));
+        let _ = fs::write(home.join(".claude/CLAUDE.md"), "from claude\n");
+        let _ = fs::write(home.join(".codex/AGENTS.md"), "old codex copy\n");
+
+        let report = match sync(&SyncOptions {
+            from: ToolId::Claude,
+            to: vec![ToolId::Codex],
+            kinds: SyncKinds {
+                instructions: true,
+                skills: false,
+                mcp: false,
+            },
+            dry_run: false,
+            prune: false,
+            force: false,
+            home: Some(home.to_path_buf()),
+        }) {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert!(!report.success(), "expected conflict without --force");
+        assert!(
+            report.render().contains("instructions: ERROR"),
+            "expected error line, got:\n{}",
+            report.render()
+        );
+
+        let report_force = match sync(&SyncOptions {
+            from: ToolId::Claude,
+            to: vec![ToolId::Codex],
+            kinds: SyncKinds {
+                instructions: true,
+                skills: false,
+                mcp: false,
+            },
+            dry_run: false,
+            prune: false,
+            force: true,
+            home: Some(home.to_path_buf()),
+        }) {
+            Ok(r) => r,
+            Err(e) => panic!("{e}"),
+        };
+        assert!(report_force.success(), "{}", report_force.render());
+        let link = home.join(".codex/AGENTS.md");
+        assert!(
+            link.symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn diff_instructions_shows_paths_then_content() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let home = dir.path();
+        let _ = fs::create_dir_all(home.join(".claude"));
+        let _ = fs::create_dir_all(home.join(".codex"));
+        let _ = fs::write(home.join(".claude/CLAUDE.md"), "alpha\n");
+        let _ = fs::write(home.join(".codex/AGENTS.md"), "beta\n");
+
+        let out = match diff(ToolId::Claude, ToolId::Codex, Some(home.to_path_buf())) {
+            Ok(s) => s,
+            Err(e) => panic!("{e}"),
+        };
+        assert!(out.contains("## Instructions"), "{out}");
+        assert!(out.contains("claude:"), "{out}");
+        assert!(out.contains("codex:"), "{out}");
+        assert!(out.contains("alpha") || out.contains("beta"), "{out}");
     }
 }

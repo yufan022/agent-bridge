@@ -50,8 +50,8 @@ pub enum Error {
     #[error("invalid MCP config at {path}: {message}")]
     InvalidMcp { path: PathBuf, message: String },
 
-    #[error("skill conflict for '{name}' at {path}: {message}")]
-    SkillConflict {
+    #[error("link conflict for '{name}' at {path}: {message}")]
+    LinkConflict {
         name: String,
         path: PathBuf,
         message: String,

@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::error::{Error, Result};
-use crate::paths::ensure_parent;
+use crate::symlink;
+
+pub use crate::symlink::LinkAction;
 
 /// A discovered skill directory.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,86 +59,11 @@ pub fn link_skill(
     source_real_path: &Path,
     force: bool,
 ) -> Result<LinkAction> {
-    let source_real = dunce::canonicalize(source_real_path)
-        .map_err(|e| Error::io(source_real_path, e))?;
-
-    if link_path.exists() || link_path.symlink_metadata().is_ok() {
-        if let Ok(meta) = link_path.symlink_metadata() {
-            if meta.file_type().is_symlink() {
-                let current = fs::read_link(link_path).map_err(|e| Error::io(link_path, e))?;
-                let current_real = resolve_link_target(link_path, &current);
-                if let Ok(resolved) = current_real {
-                    if resolved == source_real {
-                        return Ok(LinkAction::Unchanged);
-                    }
-                }
-                if !force {
-                    return Err(Error::SkillConflict {
-                        name: link_path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("?")
-                            .to_string(),
-                        path: link_path.to_path_buf(),
-                        message: "symlink exists and points elsewhere (use --force to replace)"
-                            .to_string(),
-                    });
-                }
-                fs::remove_file(link_path).map_err(|e| Error::io(link_path, e))?;
-            } else if meta.is_dir() {
-                if !force {
-                    return Err(Error::SkillConflict {
-                        name: link_path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("?")
-                            .to_string(),
-                        path: link_path.to_path_buf(),
-                        message: "real directory exists (use --force to replace with symlink)"
-                            .to_string(),
-                    });
-                }
-                fs::remove_dir_all(link_path).map_err(|e| Error::io(link_path, e))?;
-            } else {
-                if !force {
-                    return Err(Error::SkillConflict {
-                        name: link_path
-                            .file_name()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or("?")
-                            .to_string(),
-                        path: link_path.to_path_buf(),
-                        message: "path exists and is not a symlink".to_string(),
-                    });
-                }
-                fs::remove_file(link_path).map_err(|e| Error::io(link_path, e))?;
-            }
-        }
-    }
-
-    ensure_parent(link_path)?;
-    std::os::unix::fs::symlink(&source_real, link_path)
-        .map_err(|e| Error::io(link_path, e))?;
-    Ok(LinkAction::Created)
-}
-
-fn resolve_link_target(link_path: &Path, current: &Path) -> Result<PathBuf> {
-    let absolute = if current.is_absolute() {
-        current.to_path_buf()
-    } else {
-        link_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(current)
-    };
-    dunce::canonicalize(&absolute).map_err(|e| Error::io(&absolute, e))
-}
-
-/// Result of a link_skill call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkAction {
-    Created,
-    Unchanged,
+    let name = link_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?");
+    symlink::ensure_symlink(link_path, source_real_path, force, name)
 }
 
 /// Remove orphan symlinks under `skills_dir` whose names are not in `keep`
@@ -178,7 +105,7 @@ pub fn prune_skill_links(
                     continue;
                 }
             };
-            let resolved = resolve_link_target(&path, &target).ok();
+            let resolved = symlink::resolve_link_target(&path, &target).ok();
             let under_root = resolved
                 .as_ref()
                 .map(|r| r.starts_with(root))

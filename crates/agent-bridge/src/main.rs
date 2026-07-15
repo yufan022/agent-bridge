@@ -46,7 +46,7 @@ enum Commands {
         #[arg(long)]
         prune: bool,
 
-        /// Replace conflicting skill paths with symlinks
+        /// Replace conflicting skill / instruction paths with symlinks
         #[arg(long)]
         force: bool,
     },
