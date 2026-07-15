@@ -215,15 +215,29 @@ pub fn sync(opts: &SyncOptions) -> Result<SyncReport> {
                 }
             }
             if opts.prune {
+                let source_skills = source.paths().skills_dir.clone();
                 if opts.dry_run {
-                    report.lines.push(
-                        "  skills prune: would remove orphan symlinks not in source".into(),
-                    );
+                    let orphans = skills::list_orphan_skill_links(
+                        &target.paths().skills_dir,
+                        &keep,
+                        Some(&source_skills),
+                    )?;
+                    if orphans.is_empty() {
+                        report
+                            .lines
+                            .push("  skills prune: no orphan symlinks".into());
+                    } else {
+                        for name in orphans {
+                            report
+                                .lines
+                                .push(format!("  skill '{name}': would prune symlink"));
+                        }
+                    }
                 } else {
                     let removed = skills::prune_skill_links(
                         &target.paths().skills_dir,
                         &keep,
-                        Some(&source.paths().skills_dir),
+                        Some(&source_skills),
                     )?;
                     for name in removed {
                         report

@@ -66,9 +66,50 @@ pub fn link_skill(
     symlink::ensure_symlink(link_path, source_real_path, force, name)
 }
 
-/// Remove orphan symlinks under `skills_dir` whose names are not in `keep`
+/// Absolute form of a symlink target without requiring the target to exist.
+fn absolute_link_target(link_path: &Path, target: &Path) -> PathBuf {
+    if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        link_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(target)
+    }
+}
+
+/// Return true when `path` is under `root`, tolerating non-canonical roots.
+fn path_under_root(path: &Path, root: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    match dunce::canonicalize(root) {
+        Ok(canon_root) => path.starts_with(&canon_root),
+        Err(_) => false,
+    }
+}
+
+/// Whether a skill symlink can be attributed to `source_skills_root`.
+///
+/// Live targets are checked after canonicalize. Dangling targets (source skill
+/// deleted) are attributed by the unresolved absolute link path so orphans are
+/// still pruned.
+fn link_attributable_to_source(
+    link_path: &Path,
+    target: &Path,
+    source_skills_root: &Path,
+) -> bool {
+    match symlink::resolve_link_target(link_path, target) {
+        Ok(resolved) => path_under_root(&resolved, source_skills_root),
+        Err(_) => path_under_root(&absolute_link_target(link_path, target), source_skills_root),
+    }
+}
+
+/// List orphan skill symlink names under `skills_dir` that are not in `keep`
 /// and that point under `source_skills_root` (optional filter).
-pub fn prune_skill_links(
+///
+/// Does not modify the filesystem.
+pub fn list_orphan_skill_links(
     skills_dir: &Path,
     keep: &std::collections::BTreeSet<String>,
     source_skills_root: Option<&Path>,
@@ -76,7 +117,7 @@ pub fn prune_skill_links(
     if !skills_dir.exists() {
         return Ok(Vec::new());
     }
-    let mut removed = Vec::new();
+    let mut orphans = Vec::new();
     let read_dir = fs::read_dir(skills_dir).map_err(|e| Error::io(skills_dir, e))?;
     for item in read_dir {
         let item = item.map_err(|e| Error::io(skills_dir, e))?;
@@ -96,25 +137,37 @@ pub fn prune_skill_links(
             continue;
         }
         if let Some(root) = source_skills_root {
-            let target = match fs::read_link(&path) {
-                Ok(t) => t,
-                Err(_) => {
-                    // Broken symlink: remove when pruning
-                    fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
-                    removed.push(name);
-                    continue;
+            match fs::read_link(&path) {
+                Ok(target) => {
+                    if !link_attributable_to_source(&path, &target, root) {
+                        // Only prune links we can attribute to the source skills tree.
+                        continue;
+                    }
                 }
-            };
-            let resolved = symlink::resolve_link_target(&path, &target).ok();
-            let under_root = resolved
-                .as_ref()
-                .map(|r| r.starts_with(root))
-                .unwrap_or(false);
-            if !under_root {
-                // Only prune links we can attribute to the source skills tree.
-                continue;
+                Err(_) => {
+                    // Unreadable symlink target: treat as orphan when pruning.
+                }
             }
         }
+        orphans.push(name);
+    }
+    orphans.sort();
+    Ok(orphans)
+}
+
+/// Remove orphan symlinks under `skills_dir` whose names are not in `keep`
+/// and that point under `source_skills_root` (optional filter).
+///
+/// Returns the names that were removed.
+pub fn prune_skill_links(
+    skills_dir: &Path,
+    keep: &std::collections::BTreeSet<String>,
+    source_skills_root: Option<&Path>,
+) -> Result<Vec<String>> {
+    let orphans = list_orphan_skill_links(skills_dir, keep, source_skills_root)?;
+    let mut removed = Vec::new();
+    for name in orphans {
+        let path = skills_dir.join(&name);
         fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
         removed.push(name);
     }
@@ -188,5 +241,129 @@ mod tests {
         }
         let err = link_skill(&link, &other, false);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn prune_removes_dangling_symlink_under_source_root() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let src_root = dir.path().join("src_skills");
+        let dst_root = dir.path().join("dst_skills");
+        if fs::create_dir_all(&src_root).is_err() || fs::create_dir_all(&dst_root).is_err() {
+            return;
+        }
+        let gone = src_root.join("gone-skill");
+        let link = dst_root.join("gone-skill");
+        // Dangling symlink whose target path is still under the source skills root.
+        if std::os::unix::fs::symlink(&gone, &link).is_err() {
+            return;
+        }
+        assert!(link.symlink_metadata().is_ok());
+        assert!(!gone.exists());
+
+        let keep = std::collections::BTreeSet::new();
+        let removed = match prune_skill_links(&dst_root, &keep, Some(&src_root)) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        assert_eq!(removed, vec!["gone-skill".to_string()]);
+        assert!(link.symlink_metadata().is_err());
+    }
+
+    #[test]
+    fn prune_keeps_dangling_symlink_outside_source_root() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let src_root = dir.path().join("src_skills");
+        let other_root = dir.path().join("other_skills");
+        let dst_root = dir.path().join("dst_skills");
+        if fs::create_dir_all(&src_root).is_err()
+            || fs::create_dir_all(&other_root).is_err()
+            || fs::create_dir_all(&dst_root).is_err()
+        {
+            return;
+        }
+        let gone = other_root.join("external-skill");
+        let link = dst_root.join("external-skill");
+        if std::os::unix::fs::symlink(&gone, &link).is_err() {
+            return;
+        }
+
+        let keep = std::collections::BTreeSet::new();
+        let removed = match prune_skill_links(&dst_root, &keep, Some(&src_root)) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        assert!(removed.is_empty());
+        assert!(link.symlink_metadata().is_ok());
+    }
+
+    #[test]
+    fn prune_removes_live_orphan_under_source_root() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let src_root = dir.path().join("src_skills");
+        let dst_root = dir.path().join("dst_skills");
+        if fs::create_dir_all(&src_root).is_err() || fs::create_dir_all(&dst_root).is_err() {
+            return;
+        }
+        let orphan = write_skill(
+            &src_root,
+            "orphan",
+            "---\nname: orphan\ndescription: d\n---\n",
+        );
+        let link = dst_root.join("orphan");
+        if link_skill(&link, &orphan, false).is_err() {
+            return;
+        }
+
+        let keep = std::collections::BTreeSet::new();
+        let listed = match list_orphan_skill_links(&dst_root, &keep, Some(&src_root)) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        assert_eq!(listed, vec!["orphan".to_string()]);
+
+        let removed = match prune_skill_links(&dst_root, &keep, Some(&src_root)) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        assert_eq!(removed, vec!["orphan".to_string()]);
+        assert!(link.symlink_metadata().is_err());
+        // Source skill directory itself is untouched.
+        assert!(orphan.join("SKILL.md").is_file());
+    }
+
+    #[test]
+    fn prune_skips_names_in_keep() {
+        let dir = match tempdir() {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        let src_root = dir.path().join("src_skills");
+        let dst_root = dir.path().join("dst_skills");
+        if fs::create_dir_all(&src_root).is_err() || fs::create_dir_all(&dst_root).is_err() {
+            return;
+        }
+        let skill = write_skill(&src_root, "keep-me", "---\nname: keep-me\ndescription: d\n---\n");
+        let link = dst_root.join("keep-me");
+        if link_skill(&link, &skill, false).is_err() {
+            return;
+        }
+
+        let mut keep = std::collections::BTreeSet::new();
+        keep.insert("keep-me".to_string());
+        let removed = match prune_skill_links(&dst_root, &keep, Some(&src_root)) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        assert!(removed.is_empty());
+        assert!(link.symlink_metadata().is_ok());
     }
 }
