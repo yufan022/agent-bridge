@@ -7,7 +7,7 @@ Supported tools:
 | Tool | Instructions | Skills | MCP |
 |------|--------------|--------|-----|
 | `claude` | `~/.claude/CLAUDE.md` | `~/.claude/skills/` | `~/.claude.json` → `mcpServers` |
-| `codex` | `~/.codex/AGENTS.md` | `~/.agents/skills/` | `~/.codex/config.toml` → `[mcp_servers.*]` |
+| `codex` | `~/.codex/AGENTS.md` | `~/.codex/skills/` | `~/.codex/config.toml` → `[mcp_servers.*]` |
 | `opencode` | `~/.config/opencode/AGENTS.md` | `~/.config/opencode/skills/` | `~/.config/opencode/opencode.json` → `mcp` |
 | `cursor` | *(unsupported)* | `~/.cursor/skills/` | `~/.cursor/mcp.json` → `mcpServers` |
 

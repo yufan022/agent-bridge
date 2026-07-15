@@ -39,7 +39,7 @@ impl ToolPaths {
             ToolId::Codex => Self {
                 tool,
                 instructions: Some(home.join(".codex/AGENTS.md")),
-                skills_dir: home.join(".agents/skills"),
+                skills_dir: home.join(".codex/skills"),
                 mcp_config: home.join(".codex/config.toml"),
                 home,
             },
@@ -107,7 +107,7 @@ mod tests {
             p.instructions.as_deref(),
             Some(Path::new("/tmp/home/.codex/AGENTS.md"))
         );
-        assert_eq!(p.skills_dir, Path::new("/tmp/home/.agents/skills"));
+        assert_eq!(p.skills_dir, Path::new("/tmp/home/.codex/skills"));
         assert_eq!(p.mcp_config, Path::new("/tmp/home/.codex/config.toml"));
     }
 
